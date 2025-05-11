@@ -1,0 +1,8 @@
+{
+  "name": "App de ditado",
+  "description": "Ditado sem esforço com a tecnologia Gemini AI. Grave pensamentos, obtenha transcrições exactas e notas com um acabamento perfeito automaticamente.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "prompt": ""
+}
