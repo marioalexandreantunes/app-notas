@@ -28,6 +28,8 @@ if not exist ".env.local" (
 
 echo.
 echo Iniciando o servidor...
+REM Open browser to Streamlit app (this will run in background)
+start http://localhost:5173/
 echo.
 
 npm run dev
