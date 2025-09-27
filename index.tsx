@@ -4,12 +4,12 @@
 */
 /* tslint:disable */
 
-import {GoogleGenAI} from '@google/genai';
-import {marked} from 'marked';
+import { GoogleGenAI } from '@google/genai';
+import { marked } from 'marked';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const MODEL_NAME = 'gemini-2.5-flash-preview-04-17';
+const MODEL_NAME = 'gemini-2.5-flash';
 
 interface Note {
   id: string;
@@ -396,7 +396,7 @@ class VoiceNotesApp {
       this.recordingStatus.textContent = 'A solicitar acesso ao microfone...';
 
       try {
-        this.stream = await navigator.mediaDevices.getUserMedia({audio: true});
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (err) {
         console.error('Failed with basic constraints:', err);
         this.stream = await navigator.mediaDevices.getUserMedia({
@@ -561,8 +561,8 @@ class VoiceNotesApp {
       this.recordingStatus.textContent = 'Obter transcrição...';
 
       const contents = [
-        {text: 'Gere uma transcrição completa e detalhada deste áudio.'},
-        {inlineData: {mimeType: mimeType, data: base64Audio}},
+        { text: 'Gere uma transcrição completa e detalhada deste áudio.' },
+        { inlineData: { mimeType: mimeType, data: base64Audio } },
       ];
 
       const response = await this.genAI.models.generateContent({
@@ -637,7 +637,7 @@ class VoiceNotesApp {
 
                     Transcrição bruta:
                     ${this.rawTranscription.textContent}`;
-      const contents = [{text: prompt}];
+      const contents = [{ text: prompt }];
 
       const response = await this.genAI.models.generateContent({
         model: MODEL_NAME,
@@ -754,38 +754,38 @@ class VoiceNotesApp {
 
       // Obtém o conteúdo HTML da nota polida
       const noteContent = this.polishedNote.innerHTML;
-      
+
       // Converte HTML para texto simples (opcional, dependendo da necessidade)
       const textContent = noteContent.replace(/<[^>]*>/g, '');
-      
+
       // Cria um cabeçalho com data e hora
       const agora = new Date();
       const dataFormatada = agora.toLocaleDateString('pt-BR');
       const horaFormatada = agora.toLocaleTimeString('pt-BR');
-      const titulo = this.editorTitle && !this.editorTitle.classList.contains('placeholder-active') 
-        ? this.editorTitle.textContent 
+      const titulo = this.editorTitle && !this.editorTitle.classList.contains('placeholder-active')
+        ? this.editorTitle.textContent
         : 'Nota sem título';
-      
+
       // Formata o conteúdo a ser salvo
       const conteudoFinal = `\n\n=== ${titulo} - ${dataFormatada} às ${horaFormatada} ===\n\n${textContent}\n\n`;
-      
+
       // Salva a nota no localStorage
       const chaveNotas = 'voiceNotesAppNotas';
       let notasSalvas = localStorage.getItem(chaveNotas) || '';
-      
+
       // Anexa a nova nota ao conteúdo existente
       notasSalvas += conteudoFinal;
-      
+
       // Salva no localStorage
       localStorage.setItem(chaveNotas, notasSalvas);
-      
+
       this.recordingStatus.textContent = 'Nota salva com sucesso no navegador';
-      
+
       // Atualiza o timestamp da nota atual
       if (this.currentNote) {
         this.currentNote.timestamp = Date.now();
       }
-      
+
       // Opcional: Cria um link para download das notas
       this.criarLinkDownloadNotas(notasSalvas);
     } catch (error) {
@@ -793,22 +793,22 @@ class VoiceNotesApp {
       this.recordingStatus.textContent = 'Erro ao salvar a nota';
     }
   }
-  
+
   private criarLinkDownloadNotas(conteudo: string): void {
     // Verifica se já existe um link de download e o remove
     const linkAnterior = document.getElementById('download-notas');
     if (linkAnterior) {
       linkAnterior.remove();
     }
-    
+
     // Cria um elemento de link para download
     const linkDownload = document.createElement('a');
     linkDownload.id = 'download-notas';
-    linkDownload.href = URL.createObjectURL(new Blob([conteudo], {type: 'text/plain'}));
+    linkDownload.href = URL.createObjectURL(new Blob([conteudo], { type: 'text/plain' }));
     linkDownload.download = 'minhas_notas.txt';
     linkDownload.textContent = 'Baixar todas as notas';
     linkDownload.className = 'download-link';
-    
+
     // Adiciona o link após o status de gravação
     this.recordingStatus.parentNode?.insertBefore(linkDownload, this.recordingStatus.nextSibling);
   }
@@ -893,4 +893,4 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-export {};
+export { };
