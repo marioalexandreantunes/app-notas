@@ -1,7 +1,6 @@
 # Notas por Ditado
 
-Este é um exemplo de aplicação que demonstra como utilizar um Modelo de Linguagem (LLM) para criar notas através de ditado. O projeto inicial pode ser encontrado no [Google AI Studio](https://aistudio.google.com/) <mcreference link="https://aistudio.google.com/" index="0">0</mcrefer
-
+Este é um exemplo de aplicação que demonstra como utilizar um Modelo de Linguagem (LLM) para criar notas através de ditado. O projeto inicial pode ser encontrado no [Google AI Studio](https://aistudio.google.com/).
 # Como Executar e Implantar a Aplicação
 
 Este repositório contém tudo o que necessita para executar a aplicação localmente.
