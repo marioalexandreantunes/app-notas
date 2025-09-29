@@ -31,6 +31,9 @@ const MESSAGES = {
   NO_NOTE_TO_SAVE: 'Nenhuma nota para salvar',
   TRANSCRIPTION_COMPLETE: 'Transcrição completa. A melhorar a nota...',
   NOTE_IMPROVED: 'Nota melhorada. Pronto para a próxima gravação.',
+  CONTINUOUS_RECORDING: 'Gravação contínua ativa - processando a cada 2 minutos',
+  PROCESSING_SEGMENT: 'Processando segmento em segundo plano...',
+  RECORDING_CONTINUOUS: 'Gravando continuamente (sem interrupções)',
 } as const;
 
 const AUDIO_TAGS = {
@@ -47,9 +50,18 @@ interface Note {
   timestamp: number;
 }
 
+interface AudioSegment {
+  blob: Blob;
+  startTime: number;
+  endTime: number;
+  segmentNumber: number;
+}
+
 class VoiceNotesApp {
   private genAI: any;
-  private mediaRecorder: MediaRecorder | null = null;
+  private primaryRecorder: MediaRecorder | null = null;
+  private secondaryRecorder: MediaRecorder | null = null;
+  private activeRecorder: 'primary' | 'secondary' = 'primary';
 
   // Elementos DOM
   private recordButton: HTMLButtonElement;
@@ -58,7 +70,7 @@ class VoiceNotesApp {
   private polishedNote: HTMLDivElement;
   private newButton: HTMLButtonElement;
   private saveButton: HTMLButtonElement;
-  private themeToggleButton: HTMLButtonElement;
+  private themeToggleButton: HTMLButtonButton;
   private themeToggleIcon: HTMLElement;
   private editorTitle: HTMLDivElement;
   private recordingInterface: HTMLDivElement;
@@ -69,11 +81,18 @@ class VoiceNotesApp {
   private statusIndicatorDiv: HTMLDivElement | null;
 
   // Estado da aplicação
-  private audioChunks: Blob[] = [];
+  private primaryAudioChunks: Blob[] = [];
+  private secondaryAudioChunks: Blob[] = [];
   private isRecording = false;
+  private isContinuousMode = false;
   private currentNote: Note | null = null;
   private openingTags: string = '';
   private closingTags: string = '';
+  private segmentCount = 0;
+  private accumulatedTranscription = '';
+  private accumulatedPolishedNote = '';
+  private processingQueue: AudioSegment[] = [];
+  private isProcessingSegment = false;
 
   // Streams e contexto de áudio
   private stream: MediaStream | null = null;
@@ -87,6 +106,12 @@ class VoiceNotesApp {
   private waveformDrawingId: number | null = null;
   private timerIntervalId: number | null = null;
   private recordingStartTime: number = 0;
+  private segmentIntervalId: number | null = null;
+  private currentSegmentStartTime: number = 0;
+  private segmentStartTime: number = 0;
+
+  // Configurações
+  private readonly SEGMENT_DURATION_MS = 2 * 60 * 1000; // 2 minutos
 
   constructor() {
     this.genAI = new GoogleGenAI({
@@ -196,6 +221,10 @@ class VoiceNotesApp {
       clearInterval(this.timerIntervalId);
       this.timerIntervalId = null;
     }
+    if (this.segmentIntervalId) {
+      clearInterval(this.segmentIntervalId);
+      this.segmentIntervalId = null;
+    }
   }
 
   // Utilitário para verificar se elemento tem conteúdo válido
@@ -279,9 +308,260 @@ class VoiceNotesApp {
 
   private async toggleRecording(): Promise<void> {
     if (!this.isRecording) {
-      await this.startRecording();
+      await this.startContinuousRecording();
     } else {
-      await this.stopRecording();
+      await this.stopContinuousRecording();
+    }
+  }
+
+  private async startContinuousRecording(): Promise<void> {
+    try {
+      this.isContinuousMode = true;
+      this.segmentCount = 1;
+      this.accumulatedTranscription = '';
+      this.accumulatedPolishedNote = '';
+      this.processingQueue = [];
+      this.isProcessingSegment = false;
+
+      await this.setupStreams();
+      await this.startDualRecording();
+
+      if (this.isRecording) {
+        this.setStatus(MESSAGES.RECORDING_CONTINUOUS);
+        this.setupSegmentTimer();
+      }
+    } catch (error) {
+      console.error('Erro ao iniciar gravação contínua:', error);
+      this.isContinuousMode = false;
+      this.handleRecordingError(error);
+    }
+  }
+
+  private async stopContinuousRecording(): Promise<void> {
+    this.isContinuousMode = false;
+    this.cleanupAnimations();
+
+    // Processar último segmento se necessário
+    if (this.isRecording) {
+      await this.finalizeContinuousRecording();
+    }
+
+    await this.stopDualRecording();
+    this.cleanupStreams();
+  }
+
+  private async setupStreams(): Promise<void> {
+    this.cleanupStreams();
+    await this.cleanupAudioContext();
+
+    this.setStatus(MESSAGES.REQUESTING_ACCESS);
+
+    // Capturar streams
+    const streams = await this.captureAudioStreams();
+    this.screenStream = streams.screen;
+    this.micStream = streams.mic;
+
+    const hasTabAudio = !!(this.screenStream?.getAudioTracks().length);
+    const hasMicAudio = !!(this.micStream?.getAudioTracks().length);
+
+    this.setupAudioTags(hasTabAudio, hasMicAudio);
+    this.stream = await this.setupFinalStream(hasTabAudio, hasMicAudio);
+  }
+
+  private async startDualRecording(): Promise<void> {
+    // Reset chunks
+    this.primaryAudioChunks = [];
+    this.secondaryAudioChunks = [];
+
+    // Configurar ambos os recorders
+    this.setupDualMediaRecorders();
+
+    // Iniciar gravação primary
+    this.activeRecorder = 'primary';
+    this.primaryRecorder!.start();
+    this.segmentStartTime = Date.now();
+
+    this.isRecording = true;
+    this.recordButton?.classList.add('recording');
+    this.recordButton?.setAttribute('title', 'Parar Gravação');
+    this.startLiveDisplay();
+  }
+
+  private async stopDualRecording(): Promise<void> {
+    if (this.primaryRecorder && this.primaryRecorder.state === 'recording') {
+      this.primaryRecorder.stop();
+    }
+    if (this.secondaryRecorder && this.secondaryRecorder.state === 'recording') {
+      this.secondaryRecorder.stop();
+    }
+
+    this.isRecording = false;
+    this.recordButton?.classList.remove('recording');
+    this.recordButton?.setAttribute('title', 'Iniciar Gravação');
+    this.stopLiveDisplay();
+  }
+
+  private setupDualMediaRecorders(): void {
+    const mimeType = this.getSupportedMimeType();
+
+    // Setup Primary Recorder
+    this.primaryRecorder = new MediaRecorder(this.stream!, { mimeType });
+    this.setupRecorderEvents(this.primaryRecorder, 'primary');
+
+    // Setup Secondary Recorder  
+    this.secondaryRecorder = new MediaRecorder(this.stream!, { mimeType });
+    this.setupRecorderEvents(this.secondaryRecorder, 'secondary');
+  }
+
+  private getSupportedMimeType(): string {
+    const types = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+      'audio/ogg;codecs=opus'
+    ];
+
+    for (const type of types) {
+      if (MediaRecorder.isTypeSupported(type)) {
+        return type;
+      }
+    }
+    return '';
+  }
+
+  private setupRecorderEvents(recorder: MediaRecorder, type: 'primary' | 'secondary'): void {
+    recorder.ondataavailable = (event) => {
+      if (event.data?.size > 0) {
+        if (type === 'primary') {
+          this.primaryAudioChunks.push(event.data);
+        } else {
+          this.secondaryAudioChunks.push(event.data);
+        }
+      }
+    };
+
+    recorder.onstop = () => {
+      const chunks = type === 'primary' ? this.primaryAudioChunks : this.secondaryAudioChunks;
+
+      if (chunks.length > 0) {
+        const audioBlob = new Blob(chunks, { type: recorder.mimeType });
+        const segment: AudioSegment = {
+          blob: audioBlob,
+          startTime: this.segmentStartTime,
+          endTime: Date.now(),
+          segmentNumber: this.segmentCount + 1
+        };
+
+        this.processingQueue.push(segment);
+        this.processNextSegment();
+
+        // Limpar chunks após criar o blob
+        if (type === 'primary') {
+          this.primaryAudioChunks = [];
+        } else {
+          this.secondaryAudioChunks = [];
+        }
+      }
+    };
+  }
+
+  private setupSegmentTimer(): void {
+    if (this.segmentIntervalId) {
+      clearInterval(this.segmentIntervalId);
+    }
+
+    this.segmentIntervalId = window.setInterval(() => {
+      if (this.isContinuousMode && this.isRecording) {
+        this.switchRecorders();
+      }
+    }, this.SEGMENT_DURATION_MS);
+  }
+
+  private switchRecorders(): void {
+    if (!this.isContinuousMode || !this.isRecording) return;
+
+    try {
+      const currentRecorder = this.activeRecorder === 'primary' ? this.primaryRecorder : this.secondaryRecorder;
+      const nextRecorder = this.activeRecorder === 'primary' ? this.secondaryRecorder : this.primaryRecorder;
+
+      if (!currentRecorder || !nextRecorder) return;
+
+      // Parar o recorder atual (isso vai triggerar o onstop e processar o segmento)
+      if (currentRecorder.state === 'recording') {
+        currentRecorder.stop();
+      }
+
+      // Iniciar o próximo recorder imediatamente
+      this.activeRecorder = this.activeRecorder === 'primary' ? 'secondary' : 'primary';
+      this.segmentStartTime = Date.now();
+      nextRecorder.start();
+
+      console.log(`Switched to ${this.activeRecorder} recorder for segment ${this.segmentCount + 1}`);
+
+    } catch (error) {
+      console.error('Erro ao alternar recorders:', error);
+    }
+  }
+
+  private async processNextSegment(): Promise<void> {
+    if (this.isProcessingSegment || this.processingQueue.length === 0) {
+      return;
+    }
+
+    this.isProcessingSegment = true;
+    const segment = this.processingQueue.shift()!;
+
+    try {
+      this.setStatus(`${MESSAGES.PROCESSING_SEGMENT} (Segmento ${segment.segmentNumber})`);
+      await this.processAudioSegment(segment);
+    } catch (error) {
+      console.error(`Erro ao processar segmento ${segment.segmentNumber}:`, error);
+    } finally {
+      this.isProcessingSegment = false;
+
+      // Processar próximo segmento se houver
+      if (this.processingQueue.length > 0) {
+        setTimeout(() => this.processNextSegment(), 100);
+      } else if (this.isContinuousMode) {
+        this.setStatus(MESSAGES.RECORDING_CONTINUOUS);
+      }
+    }
+  }
+
+  private async finalizeContinuousRecording(): Promise<void> {
+    // Parar recorder ativo para capturar último segmento
+    const activeRecorderObj = this.activeRecorder === 'primary' ? this.primaryRecorder : this.secondaryRecorder;
+
+    if (activeRecorderObj && activeRecorderObj.state === 'recording') {
+      activeRecorderObj.stop();
+    }
+
+    // Aguardar processamento de todos os segmentos
+    let attempts = 0;
+    while ((this.processingQueue.length > 0 || this.isProcessingSegment) && attempts < 50) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      attempts++;
+    }
+  }
+
+  private async processAudioSegment(segment: AudioSegment): Promise<void> {
+    if (segment.blob.size === 0) {
+      console.warn(`Segmento ${segment.segmentNumber} vazio`);
+      return;
+    }
+
+    try {
+      const wavBlob = await this.convertToWav(segment.blob);
+      const base64Audio = await this.blobToBase64(wavBlob);
+
+      if (!base64Audio) {
+        throw new Error('Falha ao converter áudio para base64');
+      }
+
+      await this.getSegmentTranscription(base64Audio, segment.segmentNumber);
+    } catch (error) {
+      console.error(`Erro ao processar segmento ${segment.segmentNumber}:`, error);
+      throw error;
     }
   }
 
@@ -355,8 +635,21 @@ class VoiceNotesApp {
     const seconds = totalSeconds % 60;
     const hundredths = Math.floor((elapsedMs % 1000) / 10);
 
-    this.liveRecordingTimerDisplay.textContent =
-      `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(hundredths).padStart(2, '0')}`;
+    let timerText = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(hundredths).padStart(2, '0')}`;
+
+    if (this.isContinuousMode) {
+      const segmentElapsed = Date.now() - this.segmentStartTime;
+      const segmentSeconds = Math.floor(segmentElapsed / 1000);
+      const segmentMinutes = Math.floor(segmentSeconds / 60);
+      const segmentRemainingSeconds = segmentSeconds % 60;
+      timerText += ` | Seg: ${String(segmentMinutes).padStart(2, '0')}:${String(segmentRemainingSeconds).padStart(2, '0')}`;
+
+      if (this.processingQueue.length > 0 || this.isProcessingSegment) {
+        timerText += ` | Processando: ${this.segmentCount} Seg`;
+      }
+    }
+
+    this.liveRecordingTimerDisplay.textContent = timerText;
   }
 
   private startLiveDisplay(): void {
@@ -368,7 +661,6 @@ class VoiceNotesApp {
       return;
     }
 
-    // Configurar display
     this.recordingInterface!.classList.add('is-live');
     [this.liveRecordingTitle, this.liveWaveformCanvas, this.liveRecordingTimerDisplay]
       .forEach(el => el!.style.display = 'block');
@@ -379,19 +671,21 @@ class VoiceNotesApp {
       this.statusIndicatorDiv.style.display = 'none';
     }
 
-    // Configurar botão
     const iconElement = this.recordButton?.querySelector('.record-button-inner i') as HTMLElement;
     if (iconElement) {
       iconElement.classList.replace('fa-microphone', 'fa-stop');
     }
 
-    // Configurar título
     const currentTitle = this.editorTitle?.textContent?.trim();
     const placeholder = this.editorTitle?.getAttribute('placeholder') || 'Untitled Note';
-    this.liveRecordingTitle!.textContent =
-      (currentTitle && currentTitle !== placeholder) ? currentTitle : 'Nova Gravação';
+    let displayTitle = (currentTitle && currentTitle !== placeholder) ? currentTitle : 'Nova Gravação';
 
-    // Iniciar visualizador e timer
+    if (this.isContinuousMode) {
+      displayTitle += ' (Gravação Contínua - SEM Interrupções)';
+    }
+
+    this.liveRecordingTitle!.textContent = displayTitle;
+
     this.setupAudioVisualizer();
     this.drawLiveWaveform();
 
@@ -401,9 +695,6 @@ class VoiceNotesApp {
   }
 
   private stopLiveDisplay(): void {
-    const elements = [this.recordingInterface, this.liveRecordingTitle,
-    this.liveWaveformCanvas, this.liveRecordingTimerDisplay];
-
     if (this.recordingInterface) {
       this.recordingInterface.classList.remove('is-live');
     }
@@ -417,13 +708,11 @@ class VoiceNotesApp {
       this.statusIndicatorDiv.style.display = 'block';
     }
 
-    // Restaurar botão
     const iconElement = this.recordButton?.querySelector('.record-button-inner i') as HTMLElement;
     if (iconElement) {
       iconElement.classList.replace('fa-stop', 'fa-microphone');
     }
 
-    // Limpar animações e contexto
     this.cleanupAnimations();
 
     if (this.liveWaveformCtx && this.liveWaveformCanvas) {
@@ -449,52 +738,10 @@ class VoiceNotesApp {
     return dest.stream;
   }
 
-  private async startRecording(): Promise<void> {
-    try {
-      // Reset state
-      this.audioChunks = [];
-      this.openingTags = '';
-      this.closingTags = '';
-
-      // Cleanup previous state
-      this.cleanupStreams();
-      await this.cleanupAudioContext();
-
-      this.setStatus(MESSAGES.REQUESTING_ACCESS);
-
-      // Capturar streams
-      const streams = await this.captureAudioStreams();
-      this.screenStream = streams.screen;
-      this.micStream = streams.mic;
-
-      const hasTabAudio = !!(this.screenStream?.getAudioTracks().length);
-      const hasMicAudio = !!(this.micStream?.getAudioTracks().length);
-
-      this.setupAudioTags(hasTabAudio, hasMicAudio);
-
-      // Configurar stream final
-      this.stream = await this.setupFinalStream(hasTabAudio, hasMicAudio);
-
-      // Configurar MediaRecorder
-      this.setupMediaRecorder();
-      this.mediaRecorder!.start();
-      this.isRecording = true;
-
-      this.recordButton?.classList.add('recording');
-      this.recordButton?.setAttribute('title', 'Parar Gravação');
-      this.startLiveDisplay();
-
-    } catch (error) {
-      console.error('Erro ao iniciar a gravação:', error);
-      this.handleRecordingError(error);
-    }
-  }
-
   private async captureAudioStreams(): Promise<{ screen: MediaStream | null, mic: MediaStream | null }> {
     let screenStream: MediaStream | null = null;
     let micStream: MediaStream | null = null;
 
-    // Capturar áudio da guia
     if (navigator.mediaDevices.getDisplayMedia) {
       try {
         screenStream = await navigator.mediaDevices.getDisplayMedia({
@@ -507,11 +754,9 @@ class VoiceNotesApp {
         });
       } catch (e) {
         console.warn('Falha ao capturar áudio da aba:', e);
-        this.setStatus('Áudio da aba não suportado ou negado. Usando apenas microfone.');
       }
     }
 
-    // Capturar microfone
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -541,41 +786,6 @@ class VoiceNotesApp {
     }
   }
 
-  private setupMediaRecorder(): void {
-    try {
-      this.mediaRecorder = new MediaRecorder(this.stream!, {
-        mimeType: 'audio/webm;codecs=opus',
-      });
-    } catch (e) {
-      console.error('audio/webm;codecs=opus não suportado, usando formato padrão:', e);
-      this.mediaRecorder = new MediaRecorder(this.stream!);
-    }
-
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data?.size > 0) {
-        this.audioChunks.push(event.data);
-      }
-    };
-
-    this.mediaRecorder.onstop = () => {
-      this.stopLiveDisplay();
-
-      if (this.audioChunks.length > 0) {
-        const audioBlob = new Blob(this.audioChunks, {
-          type: this.mediaRecorder?.mimeType || 'audio/webm',
-        });
-        this.processAudio(audioBlob).catch(err => {
-          console.error('Erro ao processar áudio:', err);
-          this.setStatus('Erro ao processar a gravação');
-        });
-      } else {
-        this.setStatus(MESSAGES.NO_AUDIO_CAPTURED);
-      }
-
-      this.cleanupStreams();
-    };
-  }
-
   private handleRecordingError(error: unknown): void {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorName = error instanceof Error ? error.name : 'Unknown';
@@ -594,28 +804,11 @@ class VoiceNotesApp {
 
     this.setStatus(statusMessage);
     this.isRecording = false;
+    this.isContinuousMode = false;
     this.cleanupStreams();
     this.recordButton?.classList.remove('recording');
     this.recordButton?.setAttribute('title', 'Iniciar Gravação');
     this.stopLiveDisplay();
-  }
-
-  private async stopRecording(): Promise<void> {
-    if (this.mediaRecorder && this.isRecording) {
-      try {
-        this.mediaRecorder.stop();
-      } catch (e) {
-        console.error('Erro ao parar o MediaRecorder:', e);
-        this.stopLiveDisplay();
-      }
-
-      this.isRecording = false;
-      this.recordButton?.classList.remove('recording');
-      this.recordButton?.setAttribute('title', 'Iniciar Gravação');
-      this.setStatus(MESSAGES.PROCESSING_AUDIO);
-    } else if (!this.isRecording) {
-      this.stopLiveDisplay();
-    }
   }
 
   private async convertToWav(audioBlob: Blob): Promise<Blob> {
@@ -626,7 +819,6 @@ class VoiceNotesApp {
     const { length, numberOfChannels, sampleRate } = audioBuffer;
     const channelData = Array.from({ length: numberOfChannels }, (_, i) => audioBuffer.getChannelData(i));
 
-    // Interleave channels
     const interleaved = new Float32Array(length * numberOfChannels);
     for (let i = 0; i < length; i++) {
       for (let channel = 0; channel < numberOfChannels; channel++) {
@@ -634,11 +826,9 @@ class VoiceNotesApp {
       }
     }
 
-    // Create WAV buffer
     const buffer = new ArrayBuffer(44 + interleaved.length * 2);
     const view = new DataView(buffer);
 
-    // WAV header
     const writeString = (offset: number, str: string) => {
       for (let i = 0; i < str.length; i++) {
         view.setUint8(offset + i, str.charCodeAt(i));
@@ -659,7 +849,6 @@ class VoiceNotesApp {
     writeString(36, 'data');
     view.setUint32(40, interleaved.length * 2, true);
 
-    // PCM data
     let offset = 44;
     for (let i = 0; i < interleaved.length; i++, offset += 2) {
       const sample = Math.max(-1, Math.min(1, interleaved[i]));
@@ -667,29 +856,6 @@ class VoiceNotesApp {
     }
 
     return new Blob([view], { type: 'audio/wav' });
-  }
-
-  private async processAudio(audioBlob: Blob): Promise<void> {
-    if (audioBlob.size === 0) {
-      this.setStatus(MESSAGES.NO_AUDIO_CAPTURED);
-      return;
-    }
-
-    try {
-      this.setStatus(MESSAGES.CONVERTING_AUDIO);
-
-      const wavBlob = await this.convertToWav(audioBlob);
-      const base64Audio = await this.blobToBase64(wavBlob);
-
-      if (!base64Audio) {
-        throw new Error('Falha ao converter áudio para base64');
-      }
-
-      await this.getTranscription(base64Audio, 'audio/wav');
-    } catch (error) {
-      console.error('Erro no processamento de áudio:', error);
-      this.setStatus('Erro ao processar a gravação. Por favor, tente novamente.');
-    }
   }
 
   private async blobToBase64(blob: Blob): Promise<string> {
@@ -708,13 +874,11 @@ class VoiceNotesApp {
     });
   }
 
-  private async getTranscription(base64Audio: string, mimeType: string): Promise<void> {
+  private async getSegmentTranscription(base64Audio: string, segmentNumber: number): Promise<void> {
     try {
-      this.setStatus(MESSAGES.GETTING_TRANSCRIPTION);
-
       const contents = [
         { text: 'Gere uma transcrição completa e detalhada deste áudio.' },
-        { inlineData: { mimeType: mimeType, data: base64Audio } },
+        { inlineData: { mimeType: 'audio/wav', data: base64Audio } },
       ];
 
       const response = await this.genAI.models.generateContent({
@@ -725,21 +889,25 @@ class VoiceNotesApp {
       const transcriptionText = response.text;
 
       if (transcriptionText) {
+        this.segmentCount = Math.max(this.segmentCount, segmentNumber);
+        const segmentHeader = `\n\n=== SEGMENTO ${segmentNumber} ===\n`;
         const finalRaw = this.addAudioTags(transcriptionText.trim());
-        this.updateTranscriptionDisplay(finalRaw);
+        const fullTranscription = segmentHeader + finalRaw;
+
+        this.accumulatedTranscription += fullTranscription;
+        this.updateTranscriptionDisplay(this.accumulatedTranscription);
 
         if (this.currentNote) {
-          this.currentNote.rawTranscription = finalRaw;
+          this.currentNote.rawTranscription = this.accumulatedTranscription;
         }
 
-        this.setStatus(MESSAGES.TRANSCRIPTION_COMPLETE);
         await this.getPolishedNote();
       } else {
-        this.handleTranscriptionError('A transcrição falhou ou retornou vazia.');
+        console.warn(`Transcrição vazia para segmento ${segmentNumber}`);
       }
     } catch (error) {
-      console.error('Erro ao obter a transcrição:', error);
-      this.handleTranscriptionError(`Erro durante a transcrição: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`Erro na transcrição do segmento ${segmentNumber}:`, error);
+      throw error;
     }
   }
 
@@ -753,37 +921,29 @@ class VoiceNotesApp {
   private updateTranscriptionDisplay(text: string): void {
     if (!this.rawTranscription) return;
 
-    this.rawTranscription.textContent = text;
+    //this.rawTranscription.textContent = text;
+    const htmlText = text.replace(/\n/g, '<br>');
+    this.rawTranscription.innerHTML = htmlText;
     this.setPlaceholder(this.rawTranscription, !text.trim());
-  }
 
-  private handleTranscriptionError(message: string): void {
-    this.setStatus(message);
-    this.setPlaceholder(this.rawTranscription);
-
-    if (this.polishedNote) {
-      this.polishedNote.innerHTML = `<p><em>Não foi possível transcrever o áudio. Por favor, tente novamente.</em></p>`;
-      this.setPlaceholder(this.polishedNote);
-    }
+    // Scroll to bottom para mostrar novo conteúdo
+    this.rawTranscription.scrollTop = this.rawTranscription.scrollHeight;
   }
 
   private async getPolishedNote(): Promise<void> {
     try {
       if (!this.hasValidContent(this.rawTranscription)) {
-        this.setStatus('Sem transcrição para melhorar');
-        this.handlePolishError('Nenhuma transcrição disponível para melhorar.');
         return;
       }
-
-      this.setStatus(MESSAGES.IMPROVING_NOTE);
 
       const prompt = `Pegue nesta transcrição bruta e crie uma nota bem formatada e melhorada.
                     Remova palavras de preenchimento (hum, ah, tipo), repetições e falsos começos.
                     Formate corretamente quaisquer listas ou marcadores. Use formatação markdown para títulos, listas, etc.
                     Mantenha todo o conteúdo e significado original.
+                    Esta é uma transcrição de múltiplos segmentos de uma reunião contínua.
 
                     Transcrição bruta:
-                    ${this.rawTranscription.textContent}`;
+                    ${this.accumulatedTranscription}`;
 
       const response = await this.genAI.models.generateContent({
         model: MODEL_NAME,
@@ -793,20 +953,19 @@ class VoiceNotesApp {
       const polishedText = response.text;
 
       if (polishedText) {
+        this.accumulatedPolishedNote = polishedText;
         this.updatePolishedDisplay(polishedText);
-        this.updateNoteTitle(polishedText);
+
+        if (this.segmentCount === 1) {
+          this.updateNoteTitle(polishedText);
+        }
 
         if (this.currentNote) {
           this.currentNote.polishedNote = polishedText;
         }
-
-        this.setStatus(MESSAGES.NOTE_IMPROVED);
-      } else {
-        this.handlePolishError('O melhoramento retornou vazio. A transcrição bruta está disponível.');
       }
     } catch (error) {
       console.error('Erro ao melhorar a nota:', error);
-      this.handlePolishError(`Erro durante o melhoramento: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -816,6 +975,9 @@ class VoiceNotesApp {
     const htmlContent = marked.parse(polishedText);
     this.polishedNote.innerHTML = htmlContent;
     this.setPlaceholder(this.polishedNote, !polishedText.trim());
+
+    // Scroll to bottom para mostrar novo conteúdo
+    this.polishedNote.scrollTop = this.polishedNote.scrollHeight;
   }
 
   private updateNoteTitle(polishedText: string): void {
@@ -824,7 +986,6 @@ class VoiceNotesApp {
     const lines = polishedText.split('\n').map(l => l.trim());
     let titleSet = false;
 
-    // Procurar por cabeçalho markdown
     for (const line of lines) {
       if (line.startsWith('#')) {
         const title = line.replace(/^#+\s+/, '').trim();
@@ -837,7 +998,6 @@ class VoiceNotesApp {
       }
     }
 
-    // Se não encontrou cabeçalho, usar primeira linha válida
     if (!titleSet) {
       for (const line of lines) {
         if (line.length > 0) {
@@ -856,18 +1016,8 @@ class VoiceNotesApp {
       }
     }
 
-    // Se ainda não definiu título, usar placeholder
     if (!titleSet) {
       this.setPlaceholder(this.editorTitle);
-    }
-  }
-
-  private handlePolishError(message: string): void {
-    this.setStatus('Erro ao melhorar a nota. Por favor, tente novamente.');
-
-    if (this.polishedNote) {
-      this.polishedNote.innerHTML = `<p><em>${message}</em></p>`;
-      this.setPlaceholder(this.polishedNote);
     }
   }
 
@@ -888,7 +1038,10 @@ class VoiceNotesApp {
         ? this.editorTitle.textContent
         : 'Nota sem título';
 
-      const finalContent = `\n\n=== ${title} - ${dateFormatted} às ${timeFormatted} ===\n\n${textContent}\n\n`;
+      const segmentInfo = this.segmentCount > 0 ?
+        ` (${this.segmentCount} segmentos)` : '';
+
+      const finalContent = `\n\n=== ${title}${segmentInfo} - ${dateFormatted} às ${timeFormatted} ===\n\n${textContent}\n\n`;
 
       const notesKey = 'voiceNotesAppNotas';
       const savedNotes = localStorage.getItem(notesKey) || '';
@@ -925,6 +1078,11 @@ class VoiceNotesApp {
   }
 
   private createNewNote(): void {
+    if (this.isContinuousMode) {
+      this.isContinuousMode = false;
+      this.cleanupAnimations();
+    }
+
     this.currentNote = {
       id: `note_${Date.now()}`,
       rawTranscription: '',
@@ -932,18 +1090,20 @@ class VoiceNotesApp {
       timestamp: Date.now(),
     };
 
-    // Reset displays
+    this.segmentCount = 0;
+    this.accumulatedTranscription = '';
+    this.accumulatedPolishedNote = '';
+    this.processingQueue = [];
+    this.isProcessingSegment = false;
+
     this.setPlaceholder(this.rawTranscription);
     this.setPlaceholder(this.polishedNote);
     this.setPlaceholder(this.editorTitle);
 
     this.setStatus(MESSAGES.READY_TO_RECORD);
 
-    // Stop recording if active
     if (this.isRecording) {
-      this.mediaRecorder?.stop();
-      this.isRecording = false;
-      this.recordButton?.classList.remove('recording');
+      this.stopDualRecording();
     } else {
       this.stopLiveDisplay();
     }
@@ -954,7 +1114,6 @@ class VoiceNotesApp {
 document.addEventListener('DOMContentLoaded', () => {
   new VoiceNotesApp();
 
-  // Setup contenteditable placeholder handlers
   document.querySelectorAll<HTMLElement>('[contenteditable][placeholder]').forEach(el => {
     const placeholder = el.getAttribute('placeholder')!;
 
