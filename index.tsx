@@ -72,7 +72,6 @@ class VoiceNotesApp {
   private audioChunks: Blob[] = [];
   private isRecording = false;
   private currentNote: Note | null = null;
-  private hasAttemptedPermission = false;
   private openingTags: string = '';
   private closingTags: string = '';
 

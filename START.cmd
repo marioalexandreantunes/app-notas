@@ -1,34 +1,34 @@
 @echo off
 echo ======================================================
-echo   Iniciando o App de Ditado com Gemini AI
+echo   Starting the Dictation App with Gemini AI
 echo ======================================================
 echo.
-echo Verificações antes de iniciar:
-echo  1. Verificando se dependências estão instaladas...
-echo  2. Verificando se o arquivo .env.local existe...
+echo Checks before starting:
+echo  1. Checking if dependencies are installed...
+echo  2. Checking if the .env.local file exists...
 echo.
 
 REM Verifica se a pasta node_modules existe
 if not exist "node_modules" (
-    echo [!] node_modules não encontrada. Instalando dependências...
+    echo [!] node_modules not found. Installing dependencies...
     npm install
 ) else (
-    echo [OK] Dependências já instaladas.
+    echo [OK] Dependencies already installed.
 )
 
 REM Verifica se o arquivo .env.local existe
 if not exist ".env.local" (
-    echo [ERRO] Arquivo .env.local NÃO encontrado!
-    echo Por favor, crie esse arquivo com sua API_KEY antes de continuar.
+    echo [ERROR] .env.local file NOT found!
+    echo Please create this file with your API_KEY before continuing.
     pause
     exit /b
 ) else (
-    echo [OK] Arquivo .env.local encontrado.
+    echo [OK] .env.local file found.
 )
 
 echo.
-echo Iniciando o servidor...
-REM Open browser to Streamlit app (this will run in background)
+echo Starting the server...
+REM Open browser to the application (this will run in background)
 start http://localhost:5173/
 echo.
 
