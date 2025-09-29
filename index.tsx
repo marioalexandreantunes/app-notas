@@ -4,12 +4,8 @@
 */
 /* tslint:disable */
 
-import { useState, useEffect } from "react";
-import Peer from "peerjs";
 import { GoogleGenAI } from '@google/genai';
 import { marked } from 'marked';
-import * as fs from 'fs';
-import * as path from 'path';
 
 declare global {
   interface Window {
@@ -70,7 +66,7 @@ class VoiceNotesApp {
   constructor() {
     this.genAI = new GoogleGenAI({
       apiKey: process.env.API_KEY!,
-      apiVersion: 'v1alpha',
+      apiVersion: 'v1beta',
     });
 
     this.recordButton = document.getElementById(
@@ -455,7 +451,7 @@ class VoiceNotesApp {
       if (navigator.mediaDevices.getDisplayMedia) {
         try {
           screenStream = await navigator.mediaDevices.getDisplayMedia({
-            video: { frameRate: 1, cursor: "never" },
+            //video: { frameRate: 1, cursor: "never" },
             audio: {
               echoCancellation: false,
               noiseSuppression: false,
@@ -482,7 +478,8 @@ class VoiceNotesApp {
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
-            autoGainControl: true
+            autoGainControl: true,
+            sampleRate: 48000
           }
         });
         console.log('mic audio tracks:',
