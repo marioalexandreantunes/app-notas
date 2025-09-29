@@ -4,10 +4,18 @@
 */
 /* tslint:disable */
 
+import { useState, useEffect } from "react";
+import Peer from "peerjs";
 import { GoogleGenAI } from '@google/genai';
 import { marked } from 'marked';
 import * as fs from 'fs';
 import * as path from 'path';
+
+declare global {
+  interface Window {
+    audioContext: AudioContext;
+  }
+}
 
 const MODEL_NAME = 'gemini-2.5-flash';
 
@@ -33,6 +41,15 @@ class VoiceNotesApp {
   private isRecording = false;
   private currentNote: Note | null = null;
   private stream: MediaStream | null = null;
+
+  // Mantemos referências para parar no fim
+  private screenStream: MediaStream | null = null;
+  private micStream: MediaStream | null = null;
+
+  // NOVO: etiquetas de abertura/fecho para a transcrição (início e fim de cada captura)
+  private openingTags: string = '';
+  private closingTags: string = '';
+
   private editorTitle: HTMLDivElement;
   private hasAttemptedPermission = false;
 
@@ -381,9 +398,37 @@ class VoiceNotesApp {
     this.waveformDataArray = null;
   }
 
+  // Junta APENAS ÁUDIO (não adiciona vídeo ao stream final)
+  private async mergeAudioStreams(
+    stream1: MediaStream, // áudio da aba
+    stream2: MediaStream  // micro
+  ): Promise<MediaStream> {
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    window.audioContext = audioContext;
+
+    const dest = audioContext.createMediaStreamDestination();
+
+    if (stream1.getAudioTracks().length > 0) {
+      const source1 = audioContext.createMediaStreamSource(stream1);
+      source1.connect(dest);
+    }
+
+    if (stream2.getAudioTracks().length > 0) {
+      const source2 = audioContext.createMediaStreamSource(stream2);
+      source2.connect(dest);
+    }
+
+    return dest.stream;
+  }
+
   private async startRecording(): Promise<void> {
     try {
       this.audioChunks = [];
+      // limpar etiquetas
+      this.openingTags = '';
+      this.closingTags = '';
+
+      // Limpar estado anterior
       if (this.stream) {
         this.stream.getTracks().forEach((track) => track.stop());
         this.stream = null;
@@ -392,28 +437,102 @@ class VoiceNotesApp {
         await this.audioContext.close();
         this.audioContext = null;
       }
+      if (this.screenStream) {
+        this.screenStream.getTracks().forEach(t => t.stop());
+        this.screenStream = null;
+      }
+      if (this.micStream) {
+        this.micStream.getTracks().forEach(t => t.stop());
+        this.micStream = null;
+      }
 
-      this.recordingStatus.textContent = 'A solicitar acesso ao microfone...';
+      this.recordingStatus.textContent = 'A solicitar acesso ao microfone/aba...';
 
+      // Capturar áudio da guia (com vídeo leve para manter áudio a fluir)
+      let screenStream: MediaStream | null = null;
+      let micStream: MediaStream | null = null;
+
+      if (navigator.mediaDevices.getDisplayMedia) {
+        try {
+          screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: 1, cursor: "never" },
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              sampleRate: 48000
+            },
+          });
+
+          console.log('display audio tracks:',
+            screenStream?.getAudioTracks().map(t => `${t.label} [enabled=${t.enabled}]`)
+          );
+        } catch (e) {
+          console.warn('Falha ao capturar áudio da aba (getDisplayMedia):', e);
+          this.recordingStatus.textContent = 'Áudio da aba não suportado ou negado. Usando apenas microfone.';
+        }
+      } else {
+        console.warn('getDisplayMedia não suportado pelo navegador');
+        this.recordingStatus.textContent = 'getDisplayMedia não suportado. Usando apenas microfone.';
+      }
+
+      // Captura microfone
       try {
-        this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (err) {
-        console.error('Failed with basic constraints:', err);
-        this.stream = await navigator.mediaDevices.getUserMedia({
+        micStream = await navigator.mediaDevices.getUserMedia({
           audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
         });
+        console.log('mic audio tracks:',
+          micStream?.getAudioTracks().map(t => `${t.label} [enabled=${t.enabled}]`)
+        );
+      } catch (e) {
+        console.error('Falha ao capturar microfone:', e);
+        throw e;
+      }
+
+      // Guardar referências
+      this.screenStream = screenStream || null;
+      this.micStream = micStream || null;
+
+      const hasTabAudio = !!(this.screenStream && this.screenStream.getAudioTracks().length > 0);
+      const hasMicAudio = !!(this.micStream && this.micStream.getAudioTracks().length > 0);
+
+      // Definir etiquetas de abertura/fecho no INÍCIO e no FIM da transcrição
+      if (hasTabAudio && hasMicAudio) {
+        this.openingTags = '[REUNIÃO][EU]';
+        this.closingTags = '[/REUNIÃO][/EU]';
+      } else if (hasTabAudio) {
+        this.openingTags = '[REUNIÃO]';
+        this.closingTags = '[/REUNIÃO]';
+      } else if (hasMicAudio) {
+        this.openingTags = '[EU]';
+        this.closingTags = '[/EU]';
+      } else {
+        this.openingTags = '';
+        this.closingTags = '';
+      }
+
+      // Combinar áudios
+      if (hasTabAudio && hasMicAudio) {
+        this.stream = await this.mergeAudioStreams(this.screenStream!, this.micStream!);
+      } else if (hasMicAudio) {
+        this.stream = this.micStream!;
+      } else if (hasTabAudio) {
+        // Reutilizamos merge para uniformizar
+        this.stream = await this.mergeAudioStreams(this.screenStream!, this.screenStream!);
+      } else {
+        throw new Error('Nenhum fluxo de áudio disponível');
       }
 
       try {
         this.mediaRecorder = new MediaRecorder(this.stream, {
-          mimeType: 'audio/webm',
+          mimeType: 'audio/webm;codecs=opus',
         });
       } catch (e) {
-        console.error('audio/webm não suportado, a tentar formato padrão:', e);
+        console.error('audio/webm;codecs=opus não suportado, a tentar formato padrão:', e);
         this.mediaRecorder = new MediaRecorder(this.stream);
       }
 
@@ -438,11 +557,18 @@ class VoiceNotesApp {
             'Nenhum áudio capturado. Por favor, tente novamente.';
         }
 
+        // Parar tudo no fim
         if (this.stream) {
-          this.stream.getTracks().forEach((track) => {
-            track.stop();
-          });
+          this.stream.getTracks().forEach((track) => track.stop());
           this.stream = null;
+        }
+        if (this.screenStream) {
+          this.screenStream.getTracks().forEach(t => t.stop());
+          this.screenStream = null;
+        }
+        if (this.micStream) {
+          this.micStream.getTracks().forEach(t => t.stop());
+          this.micStream = null;
         }
       };
 
@@ -464,14 +590,14 @@ class VoiceNotesApp {
         errorName === 'PermissionDeniedError'
       ) {
         this.recordingStatus.textContent =
-          'Permissão do microfone negada. Por favor, verifique as configurações do navegador e recarregue a página.';
+          'Permissão negada. Por favor, verifique as configurações do navegador e recarregue a página.';
       } else if (
         errorName === 'NotFoundError' ||
         (errorName === 'DOMException' &&
           errorMessage.includes('Requested device not found'))
       ) {
         this.recordingStatus.textContent =
-          'Nenhum microfone encontrado. Por favor, conecte um microfone.';
+          'Nenhum dispositivo de áudio encontrado.';
       } else if (
         errorName === 'NotReadableError' ||
         errorName === 'AbortError' ||
@@ -479,16 +605,27 @@ class VoiceNotesApp {
           errorMessage.includes('Failed to allocate audiosource'))
       ) {
         this.recordingStatus.textContent =
-          'Não é possível aceder ao microfone. Pode estar a ser utilizado por outra aplicação.';
+          'Não é possível acessar o áudio. Pode estar a ser utilizado por outra aplicação.';
       } else {
         this.recordingStatus.textContent = `Erro: ${errorMessage}`;
       }
 
       this.isRecording = false;
+
+      // Limpeza
       if (this.stream) {
         this.stream.getTracks().forEach((track) => track.stop());
         this.stream = null;
       }
+      if (this.screenStream) {
+        this.screenStream.getTracks().forEach(t => t.stop());
+        this.screenStream = null;
+      }
+      if (this.micStream) {
+        this.micStream.getTracks().forEach(t => t.stop());
+        this.micStream = null;
+      }
+
       this.recordButton.classList.remove('recording');
       this.recordButton.setAttribute('title', 'Iniciar Gravação');
       this.stopLiveDisplay();
@@ -514,6 +651,60 @@ class VoiceNotesApp {
     }
   }
 
+  // Converte áudio para WAV (16-bit PCM)
+  private async convertToWav(audioBlob: Blob): Promise<Blob> {
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    const length = audioBuffer.length;
+    const numberOfChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
+    const channelData: Float32Array[] = [];
+
+    for (let i = 0; i < numberOfChannels; i++) {
+      channelData.push(audioBuffer.getChannelData(i));
+    }
+
+    const interleaved = new Float32Array(length * numberOfChannels);
+    for (let i = 0; i < length; i++) {
+      for (let channel = 0; channel < numberOfChannels; channel++) {
+        interleaved[i * numberOfChannels + channel] = channelData[channel][i];
+      }
+    }
+
+    const buffer = new ArrayBuffer(44 + interleaved.length * 2);
+    const view = new DataView(buffer);
+
+    const writeString = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + interleaved.length * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numberOfChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numberOfChannels * 2, true);
+    view.setUint16(32, numberOfChannels * 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, 'data');
+    view.setUint32(40, interleaved.length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < interleaved.length; i++, offset += 2) {
+      const sample = Math.max(-1, Math.min(1, interleaved[i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+    }
+
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
   private async processAudio(audioBlob: Blob): Promise<void> {
     if (audioBlob.size === 0) {
       this.recordingStatus.textContent =
@@ -526,6 +717,8 @@ class VoiceNotesApp {
 
       this.recordingStatus.textContent = 'A converter áudio...';
 
+      // Converter para WAV para compatibilidade com Gemini
+      const wavBlob = await this.convertToWav(audioBlob);
       const reader = new FileReader();
       const readResult = new Promise<string>((resolve, reject) => {
         reader.onloadend = () => {
@@ -539,13 +732,13 @@ class VoiceNotesApp {
         };
         reader.onerror = () => reject(reader.error);
       });
-      reader.readAsDataURL(audioBlob);
+      reader.readAsDataURL(wavBlob);
       const base64Audio = await readResult;
 
       if (!base64Audio) throw new Error('Falha ao converter áudio para base64');
 
-      const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
-      await this.getTranscription(base64Audio, mimeType);
+      // Sempre usar wav para compatibilidade
+      await this.getTranscription(base64Audio, 'audio/wav');
     } catch (error) {
       console.error('Erro no processamento de áudio:', error);
       this.recordingStatus.textContent =
@@ -573,8 +766,18 @@ class VoiceNotesApp {
       const transcriptionText = response.text;
 
       if (transcriptionText) {
-        this.rawTranscription.textContent = transcriptionText;
-        if (transcriptionText.trim() !== '') {
+        // ACRESCENTAR etiquetas no INÍCIO e no FIM da transcrição
+        const trimmed = transcriptionText.trim();
+        const open = this.openingTags ? this.openingTags : '';
+        const close = this.closingTags ? this.closingTags : '';
+        const finalRaw =
+          open || close
+            ? `${open}${trimmed} ${close}`
+            : trimmed;
+
+        this.rawTranscription.textContent = finalRaw;
+
+        if (finalRaw.trim() !== '') {
           this.rawTranscription.classList.remove('placeholder-active');
         } else {
           const placeholder =
@@ -584,7 +787,8 @@ class VoiceNotesApp {
         }
 
         if (this.currentNote)
-          this.currentNote.rawTranscription = transcriptionText;
+          this.currentNote.rawTranscription = finalRaw;
+
         this.recordingStatus.textContent =
           'Transcrição completa. A melhorar a nota...';
         this.getPolishedNote().catch((err) => {
@@ -598,7 +802,7 @@ class VoiceNotesApp {
         this.polishedNote.innerHTML =
           '<p><em>Não foi possível transcrever o áudio. Por favor, tente novamente.</em></p>';
         this.rawTranscription.textContent =
-          this.rawTranscription.getAttribute('placeholder');
+          this.rawTranscription.getAttribute('placeholder') || '';
         this.rawTranscription.classList.add('placeholder-active');
       }
     } catch (error) {
@@ -607,7 +811,7 @@ class VoiceNotesApp {
         'Erro ao obter a transcrição. Por favor, tente novamente.';
       this.polishedNote.innerHTML = `<p><em>Erro durante a transcrição: ${error instanceof Error ? error.message : String(error)}</em></p>`;
       this.rawTranscription.textContent =
-        this.rawTranscription.getAttribute('placeholder');
+        this.rawTranscription.getAttribute('placeholder') || '';
       this.rawTranscription.classList.add('placeholder-active');
     }
   }
@@ -746,19 +950,14 @@ class VoiceNotesApp {
 
   private saveNewNote(): void {
     try {
-      // Verifica se há conteúdo para salvar
       if (!this.polishedNote || this.polishedNote.classList.contains('placeholder-active')) {
         this.recordingStatus.textContent = 'Nenhuma nota para salvar';
         return;
       }
 
-      // Obtém o conteúdo HTML da nota polida
       const noteContent = this.polishedNote.innerHTML;
-
-      // Converte HTML para texto simples (opcional, dependendo da necessidade)
       const textContent = noteContent.replace(/<[^>]*>/g, '');
 
-      // Cria um cabeçalho com data e hora
       const agora = new Date();
       const dataFormatada = agora.toLocaleDateString('pt-BR');
       const horaFormatada = agora.toLocaleTimeString('pt-BR');
@@ -766,27 +965,19 @@ class VoiceNotesApp {
         ? this.editorTitle.textContent
         : 'Nota sem título';
 
-      // Formata o conteúdo a ser salvo
       const conteudoFinal = `\n\n=== ${titulo} - ${dataFormatada} às ${horaFormatada} ===\n\n${textContent}\n\n`;
 
-      // Salva a nota no localStorage
       const chaveNotas = 'voiceNotesAppNotas';
       let notasSalvas = localStorage.getItem(chaveNotas) || '';
-
-      // Anexa a nova nota ao conteúdo existente
       notasSalvas += conteudoFinal;
-
-      // Salva no localStorage
       localStorage.setItem(chaveNotas, notasSalvas);
 
       this.recordingStatus.textContent = 'Nota salva com sucesso no navegador';
 
-      // Atualiza o timestamp da nota atual
       if (this.currentNote) {
         this.currentNote.timestamp = Date.now();
       }
 
-      // Opcional: Cria um link para download das notas
       this.criarLinkDownloadNotas(notasSalvas);
     } catch (error) {
       console.error('Erro ao salvar a nota:', error);
@@ -795,13 +986,11 @@ class VoiceNotesApp {
   }
 
   private criarLinkDownloadNotas(conteudo: string): void {
-    // Verifica se já existe um link de download e o remove
     const linkAnterior = document.getElementById('download-notas');
     if (linkAnterior) {
       linkAnterior.remove();
     }
 
-    // Cria um elemento de link para download
     const linkDownload = document.createElement('a');
     linkDownload.id = 'download-notas';
     linkDownload.href = URL.createObjectURL(new Blob([conteudo], { type: 'text/plain' }));
@@ -809,7 +998,6 @@ class VoiceNotesApp {
     linkDownload.textContent = 'Baixar todas as notas';
     linkDownload.className = 'download-link';
 
-    // Adiciona o link após o status de gravação
     this.recordingStatus.parentNode?.insertBefore(linkDownload, this.recordingStatus.nextSibling);
   }
 
@@ -866,7 +1054,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (el.id === 'polishedNote' && currentText === '') {
             el.innerHTML = placeholder;
           } else if (currentText === '') {
-            el.textContent = placeholder;
+            el.textContent = '';
           }
           el.classList.add('placeholder-active');
         } else {
