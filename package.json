@@ -1,7 +1,7 @@
 {
-  "name": "app-de-ditado",
+  "name": "app-de-reunioes",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,8 @@
     "marked": "^4.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.14.0",
+    "@types/marked": "^5.0.2",
+    "@types/node": "24.8.0",
     "typescript": "~5.7.2",
     "vite": "^6.2.0"
   }

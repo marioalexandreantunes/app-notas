@@ -1,6 +1,6 @@
 {
-  "name": "App de ditado",
-  "description": "Ditado sem esforço com a tecnologia Gemini AI. Grave pensamentos, obtenha transcrições exactas e notas com um acabamento perfeito automaticamente.",
+  "name": "App de Reuniões",
+  "description": "Este é um exemplo de aplicação que demonstra como utilizar um Modelo de Linguagem (LLM) para criar notas através de captura de audio numa aba do navegador e no microfone.",
   "requestFramePermissions": [
     "microphone"
   ],

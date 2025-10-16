@@ -64,21 +64,21 @@ class VoiceNotesApp {
   private activeRecorder: 'primary' | 'secondary' = 'primary';
 
   // Elementos DOM
-  private recordButton: HTMLButtonElement;
-  private recordingStatus: HTMLDivElement;
-  private rawTranscription: HTMLDivElement;
-  private polishedNote: HTMLDivElement;
-  private newButton: HTMLButtonElement;
-  private saveButton: HTMLButtonElement;
-  private themeToggleButton: HTMLButtonButton;
-  private themeToggleIcon: HTMLElement;
-  private editorTitle: HTMLDivElement;
-  private recordingInterface: HTMLDivElement;
-  private liveRecordingTitle: HTMLDivElement;
-  private liveWaveformCanvas: HTMLCanvasElement | null;
+  private recordButton!: HTMLButtonElement;
+  private recordingStatus!: HTMLDivElement;
+  private rawTranscription!: HTMLDivElement;
+  private polishedNote!: HTMLDivElement;
+  private newButton!: HTMLButtonElement;
+  private saveButton!: HTMLButtonElement;
+  private themeToggleButton!: HTMLButtonElement;
+  private themeToggleIcon!: HTMLElement;
+  private editorTitle!: HTMLDivElement;
+  private recordingInterface!: HTMLDivElement;
+  private liveRecordingTitle!: HTMLDivElement;
+  private liveWaveformCanvas!: HTMLCanvasElement | null;
   private liveWaveformCtx: CanvasRenderingContext2D | null = null;
-  private liveRecordingTimerDisplay: HTMLDivElement;
-  private statusIndicatorDiv: HTMLDivElement | null;
+  private liveRecordingTimerDisplay!: HTMLDivElement;
+  private statusIndicatorDiv!: HTMLDivElement | null;
 
   // Estado da aplicação
   private primaryAudioChunks: Blob[] = [];
@@ -102,12 +102,14 @@ class VoiceNotesApp {
   private analyserNode: AnalyserNode | null = null;
   private waveformDataArray: Uint8Array | null = null;
 
+
+
   // IDs para animações e timers
   private waveformDrawingId: number | null = null;
   private timerIntervalId: number | null = null;
   private recordingStartTime: number = 0;
   private segmentIntervalId: number | null = null;
-  private currentSegmentStartTime: number = 0;
+  //private currentSegmentStartTime: number = 0;
   private segmentStartTime: number = 0;
 
   // Configurações
@@ -578,6 +580,7 @@ class VoiceNotesApp {
     const bufferLength = this.analyserNode.frequencyBinCount;
     this.waveformDataArray = new Uint8Array(bufferLength);
 
+
     source.connect(this.analyserNode);
   }
 
@@ -936,14 +939,46 @@ class VoiceNotesApp {
         return;
       }
 
-      const prompt = `Pegue nesta transcrição bruta e crie uma nota bem formatada e melhorada.
-                    Remova palavras de preenchimento (hum, ah, tipo), repetições e falsos começos.
-                    Formate corretamente quaisquer listas ou marcadores. Use formatação markdown para títulos, listas, etc.
-                    Mantenha todo o conteúdo e significado original.
-                    Esta é uma transcrição de múltiplos segmentos de uma reunião contínua.
+      const hoje = new Date();
 
-                    Transcrição bruta:
-                    ${this.accumulatedTranscription}`;
+      const prompt = `
+          Tens de transformar esta transcrição bruta de uma reunião contínua num resumo estruturado, limpo e consistente.
+
+          REGRAS IMPORTANTES:
+          1. Remove palavras de preenchimento (hum, ah, tipo), repetições, falsos começos e erros.
+          2. Mantém o sentido e a informação integral da conversa.
+          3. Usa **formatação Markdown**, mas SEM títulos inventados fora do contexto.
+          4. NÃO inventes nomes, datas ou contextos que não existam.
+          5. Mantém a sequência lógica dos temas.
+          6. Mantém o mesmo formato em todas as saídas, mesmo que a transcrição venha em partes diferentes.
+          7. Se um nome for mencionado, mantém-no tal como está no texto (não adivinha nomes ausentes).
+
+          FORMATO OBRIGATÓRIO DA SAÍDA:
+
+          # Notas da Reunião
+
+          **Data:** ${hoje} (usa a data da reunião se estiver presente)
+          **Participantes:** (lista apenas se forem mencionados, caso contrário deixa em branco)
+
+          ---
+
+          ## 1. Tópicos Principais
+          - Resumo geral em 3-5 linhas sobre o que foi discutido.
+
+          ## 2. Pontos Detalhados
+          - Usa listas ou subtítulos curtos (###) para separar temas.
+          - Cada ponto deve conter apenas informação factual mencionada.
+          - Não usar frases genéricas tipo "a conversa foi produtiva".
+
+          ## 3. Decisões e Ações
+          - Lista apenas ações concretas e responsabilidades se existirem.
+
+          ---
+
+          Transcrição bruta:
+          ${this.accumulatedTranscription}
+          `;
+
 
       const response = await this.genAI.models.generateContent({
         model: MODEL_NAME,
@@ -954,6 +989,7 @@ class VoiceNotesApp {
 
       if (polishedText) {
         this.accumulatedPolishedNote = polishedText;
+        console.log(this.accumulatedPolishedNote);
         this.updatePolishedDisplay(polishedText);
 
         if (this.segmentCount === 1) {
